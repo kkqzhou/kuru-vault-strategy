@@ -16,14 +16,14 @@ def get_vault_markouts(date, market='MONUSDC', report=False):
     hl_fills = pd.read_csv(f'{OUTPUT_DIR}/hl_fills_{date_str}.csv')
     hl_fills['is_bid'] = hl_fills['side'] == 'buy'
     hl_fills['size_usd'] = hl_fills['price'] * hl_fills['size']
-    strategy_state['time'] = pd.to_datetime(strategy_state['time'])
+    strategy_state['time'] = pd.to_datetime(strategy_state['time'], format='mixed')
     hl_markouts = compute_markouts(hl_fills, strategy_state.set_index('time')['fair_value'])
     if report:
         print_trading_report(
             hl_markouts,
             markout_col='mo_fair_value_5s',
             aux_print_cols=['time', 'fair_value_0s', 'is_bid', 'price', 'size', 'size_usd', 'mo_fair_value_0s', 'mo_fair_value_5s'],
-            time_index=pd.to_datetime(hl_fills['time']).dt.tz_localize(None)
+            time_index=pd.to_datetime(hl_fills['time'], format='mixed').dt.tz_localize(None)
         )
     return hl_markouts
 
