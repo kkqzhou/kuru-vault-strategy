@@ -15,7 +15,7 @@ INFLUXDB_TOKEN = os.getenv('KURU_STRATEGY_INFLUXDB_TOKEN')
 DATABASE = os.getenv('KURU_STRATEGY_INFLUXDB_DATABASE')
 
 client = InfluxDBClient3(host=INFLUXDB_URL, token=INFLUXDB_TOKEN, database=DATABASE)
-dune_client = DuneClient.from_env()
+dune_client = DuneClient.from_env() if os.getenv('DUNE_API_KEY') else None
 
 VAULT_TOKEN_ADDRESSES = {
     'MONAUSD': '0x4869A4C7657cEf5E5496C9cE56DDe4CD593e4923',

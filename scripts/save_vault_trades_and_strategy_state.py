@@ -8,7 +8,7 @@ dotenv.load_dotenv()
 import numpy as np
 import os
 sys.path.append('..')
-from lib.kuru import client, get_kuru_vault_token_supply, VAULT_TOKEN_ADDRESSES
+from lib.kuru import client, dune_client, get_kuru_vault_token_supply, VAULT_TOKEN_ADDRESSES
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
 
@@ -49,13 +49,15 @@ def get_vault_strategy_state(start_date, end_date, market='MONUSDC'):
         ORDER BY time
         """
     ).to_pandas()
-    vault_token_supply = get_kuru_vault_token_supply(VAULT_TOKEN_ADDRESSES[market])
+    if dune_client is not None:
+        vault_token_supply = get_kuru_vault_token_supply(VAULT_TOKEN_ADDRESSES[market])
 
     df['time'] = pd.to_datetime(df['time'])
-    df = pd.merge_asof(df, vault_token_supply[['time', 'total_supply']], on='time')
-    df['benchmark'] = np.sqrt(df['fair_value'] / df['fair_value'].iloc[0])
-    df['perf'] = (df['base_balance'] * df['fair_value'] + df['quote_balance']) / df['total_supply']
-    df['perf'] = df['perf'] / df['perf'].iloc[0]
+    if dune_client is not None:
+        df = pd.merge_asof(df, vault_token_supply[['time', 'total_supply']], on='time')
+        df['benchmark'] = np.sqrt(df['fair_value'] / df['fair_value'].iloc[0])
+        df['perf'] = (df['base_balance'] * df['fair_value'] + df['quote_balance']) / df['total_supply']
+        df['perf'] = df['perf'] / df['perf'].iloc[0]
     return df.set_index('time').sort_index()
 
 def save_data(date, market):
