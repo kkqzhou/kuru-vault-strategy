@@ -81,6 +81,7 @@ def get_kuru_vault_token_supply(vault_token_address):
     df['time'] = pd.to_datetime(df['block_time']).dt.tz_localize(None)
     return df
 
+
 def save_kuru_vault_holdings(date=None, market='MONUSDC', cached_total_supply_df=None):
     if date is None:
         # run for previous date
@@ -119,6 +120,16 @@ def save_kuru_vault_holdings(date=None, market='MONUSDC', cached_total_supply_df
     cursor.close()
     conn.close()
     return to_save
+
+
+def get_parameter_changes(start_date, end_date=None):
+    if end_date is None:
+        end_date = pd.Timestamp.now()
+    start_str = pd.Timestamp(start_date).strftime('%Y-%m-%d %H:%M:%S')
+    end_str = pd.Timestamp(end_date).strftime('%Y-%m-%d %H:%M:%S')
+    table = client.query(f"SELECT * from skew_parameter_changes where time >= '{start_str}'::timestamp and time < '{end_str}'::timestamp order by time desc")
+    df = table.to_pandas()
+    return df
 
 if __name__ == '__main__':
     import sys
