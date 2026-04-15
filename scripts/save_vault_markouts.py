@@ -11,7 +11,7 @@ import sys
 sys.path.append('..')
 
 from lib.kuru import get_kuru_vault_token_supply, VAULT_TOKEN_ADDRESSES
-from lib.trading import compute_markouts, print_trading_report
+from lib.trading import compute_markouts, print_trading_report, print_vault_performance_report
 
 from influxdb_client_3 import InfluxDBClient3
 
@@ -85,6 +85,7 @@ def get_vault_markouts(date, market='MONUSDC', report=False, start=None, end=Non
             size_col_name='size_base',
             fee_col_name=None
         )
+        print_vault_performance_report(strategy_state, mos_fair_value)
     return mos_fair_value
 
 

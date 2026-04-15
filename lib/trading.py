@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 def process_timestamp_column(series):
@@ -136,6 +137,88 @@ def print_trading_report(df_with_markouts, markout_col, aux_print_cols, time_ind
         print(pnl_df)
 
     return pnl_df
+
+
+def print_vault_performance_report(strategy_state, markouts_df):
+    """
+    Prints a vault performance summary covering:
+      - Mark-to-market PnL vs HODL and UniV2 benchmarks
+      - PnL decomposition into spread capture vs directional
+      - Inventory/position stats
+      - Realised volatility of fair value
+
+    Parameters
+    ----------
+    strategy_state : pd.DataFrame
+        Resampled strategy state with DatetimeIndex and columns:
+        base_balance, quote_balance, fair_value, tvl, pos
+    markouts_df : pd.DataFrame
+        Output of compute_markouts(), must have columns:
+        mo_fair_value_5s, size_usd
+    """
+    ss = strategy_state.dropna(subset=['base_balance', 'quote_balance', 'fair_value', 'tvl'])
+    if ss.empty:
+        print("No strategy state data available for performance report.")
+        return
+
+    b0, q0, P0 = ss['base_balance'].iloc[0], ss['quote_balance'].iloc[0], ss['fair_value'].iloc[0]
+    b1, q1, P1 = ss['base_balance'].iloc[-1], ss['quote_balance'].iloc[-1], ss['fair_value'].iloc[-1]
+    tvl0 = b0 * P0 + q0
+
+    # --- benchmarks ---
+    vault_tvl   = b1 * P1 + q1
+    hodl_value  = b0 * P1 + q0
+    univ2_value = tvl0 * np.sqrt(P1 / P0)
+
+    # --- PnL decomposition ---
+    # spread PnL: sum of per-trade markout contribution in dollars
+    # mo_5s is in bps, so spread_pnl per trade = (mo_5s / 10000) * size_usd
+    spread_pnl     = (markouts_df['mo_fair_value_5s'] / 10000 * markouts_df['size_usd']).sum()
+    vault_pnl      = vault_tvl - tvl0
+    directional_pnl = vault_pnl - spread_pnl
+
+    # --- realised vol (annualised, then convert to period) ---
+    log_rets = np.log(ss['fair_value'] / ss['fair_value'].shift(1)).dropna()
+    dt_seconds = (ss.index[1] - ss.index[0]).total_seconds() if len(ss) > 1 else 1
+    periods_per_year = 365.25 * 24 * 3600 / dt_seconds
+    realised_vol_ann = log_rets.std() * np.sqrt(periods_per_year)
+    price_move_pct = (P1 / P0 - 1) * 100
+
+    # --- inventory stats ---
+    abs_pos = ss['pos'].abs()
+    time_over_50pct = (abs_pos > 0.5).mean() * 100
+
+    w = 60
+    print()
+    print('═' * w)
+    print('  VAULT PERFORMANCE REPORT')
+    print('═' * w)
+    print(f"  Period:   {ss.index[0]}  →  {ss.index[-1]}")
+    print(f"  Price:    {P0:.4f} → {P1:.4f}  ({price_move_pct:+.2f}%)   realised vol: {realised_vol_ann*100:.1f}% ann.")
+    print(f"  Init TVL: ${tvl0:>12,.2f}")
+    print()
+
+    print(f"  {'PnL DECOMPOSITION':─<{w-2}}")
+    print(f"  Spread capture (5s markout): ${spread_pnl:>+12,.4f}   ({spread_pnl/tvl0*100:+.4f}% of TVL)")
+    print(f"  Directional PnL:             ${directional_pnl:>+12,.4f}   ({directional_pnl/tvl0*100:+.4f}% of TVL)")
+    print(f"  ── Total vault PnL (m2m):    ${vault_pnl:>+12,.4f}   ({vault_pnl/tvl0*100:+.4f}% of TVL)")
+    print()
+
+    print(f"  {'BENCHMARKS':─<{w-2}}")
+    print(f"  Vault (m2m): ${vault_tvl:>12,.4f}   ({(vault_tvl/tvl0-1)*100:+.4f}%)")
+    print(f"  HODL:        ${hodl_value:>12,.4f}   ({(hodl_value/tvl0-1)*100:+.4f}%)")
+    print(f"  UniV2:       ${univ2_value:>12,.4f}   ({(univ2_value/tvl0-1)*100:+.4f}%)")
+    print(f"  Vault vs HODL:   ${vault_tvl - hodl_value:>+12,.4f}   (pos = vault beat buy-and-hold)")
+    print(f"  Vault vs UniV2:  ${vault_tvl - univ2_value:>+12,.4f}   (pos = active MM beat passive LP)")
+    print(f"  Implied IL:      ${univ2_value - hodl_value:>+12,.4f}   (UniV2 - HODL, always ≤ 0)")
+    print()
+
+    print(f"  {'INVENTORY':─<{w-2}}")
+    print(f"  Avg |pos|:         {abs_pos.mean():.4f}   (0=neutral, 1=fully one-sided)")
+    print(f"  Max |pos|:         {abs_pos.max():.4f}")
+    print(f"  Time |pos| > 50%:  {time_over_50pct:.1f}%")
+    print('═' * w)
+    print()
 
 
 if __name__ == '__main__':
