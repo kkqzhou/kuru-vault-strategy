@@ -30,9 +30,10 @@ def get_vault_markouts(date, market='MONUSDC', report=False):
 
 if __name__  == '__main__':
     if len(sys.argv) == 1:
-        print('Usage: python vault_trading_summary.py <yyyymmdd> [market]')
-        print('If market is not provided, it will default to MONUSDC')
-        sys.exit(1)
+        date = pd.Timestamp.now().floor('1D') - pd.Timedelta(days=1)
+        date_str = date.strftime('%Y%m%d')
+        mos_fair_value = get_vault_markouts(date, market='MONUSDC', report=True)
+        mos_fair_value.to_csv(f'{OUTPUT_DIR}/hl_markouts_{date_str}.csv', index=False)
     elif len(sys.argv) == 2:
         date = pd.Timestamp(sys.argv[1])
         date_str = date.strftime('%Y%m%d')

@@ -193,41 +193,21 @@ def main():
     )
     parser.add_argument("--address", default=DEFAULT_ADDRESS,
                         help="HL wallet address (or set HL_ACCOUNT_ADDRESS env var)")
-    parser.add_argument("--last-duration", metavar="DURATION",
-                        help="Fetch fills from the last N units, e.g. 24h, 7d, 30m")
-    parser.add_argument("--date", metavar="YYYYMMDD",
+    parser.add_argument("--date", metavar="YYYYMMDD", default=(datetime.now() - timedelta(days=1)).strftime('%Y%m%d'),
                         help="Fetch fills for a specific day, e.g. 20260323 for March 23, 2026")
     parser.add_argument("--coin", default=None,
                         help="Filter by coin, e.g. MON (default: all coins)")
     parser.add_argument("--no-open-orders", action="store_true",
                         help="Skip fetching open orders")
     args = parser.parse_args()
-
-    if not args.address:
-        parser.error(
-            "Provide --address or set HL_ACCOUNT_ADDRESS / HL_WALLET_ADDRESS env var."
-        )
-
-    if not args.last_duration and not args.date:
-        parser.error("Provide either --last-duration or --date.")
-    if args.last_duration and args.date:
-        parser.error("Provide only one of --last-duration or --date.")
-
-    now = datetime.now(timezone.utc)
-
-    if args.last_duration:
-        delta = parse_duration(args.last_duration)
-        after, before = now - delta, now
-        label = args.last_duration
-    else:
-        after, before = parse_date(args.date)
-        label = args.date
+    start, end = parse_date(args.date)
+    label = args.date
 
     coin_label = f"_{args.coin}" if args.coin else ""
     output = os.path.join(OUTPUT_DIR, f"hl_fills_{label}.csv")
 
     print(f"Address : {args.address}")
-    print(f"Window  : {after.isoformat()} → {before.isoformat()}")
+    print(f"Window  : {start.isoformat()} → {end.isoformat()}")
     if args.coin:
         print(f"Coin    : {args.coin}")
 
@@ -243,7 +223,7 @@ def main():
     # ── Fills ─────────────────────────────────────────────────────────────────
     print("Fetching fills...")
     try:
-        fills = fetch_fills_by_time(args.address, after, before)
+        fills = fetch_fills_by_time(args.address, start, end)
     except Exception as e:
         print(f"Error fetching fills: {e}", file=sys.stderr)
         sys.exit(1)
