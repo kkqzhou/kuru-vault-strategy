@@ -133,7 +133,7 @@ def print_trading_report(df_with_markouts, markout_col, aux_print_cols, time_ind
         print(f'$ weighted markout at {duration}:', ((df_with_markouts[markout_col] * df_with_markouts['size_usd']).sum() / df_with_markouts['size_usd'].sum()).round(4))
         print(f'\nWorst 10 markouts at {duration}:')
         print(df_with_markouts[aux_print_cols].sort_values(markout_col).head(10))
-        print('\nTrading PnL:')
+        print(f'\nTrading PnL (Volume = ${df_with_markouts["size_usd"].sum().round()}):')
         print(pnl_df)
 
     return pnl_df
