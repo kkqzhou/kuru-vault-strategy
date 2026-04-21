@@ -193,30 +193,29 @@ def print_hl_hedge_report(hl_markouts, pnl_df, strategy_state, hedge_ratio=1.0):
     print(f"  ── Net total:  ${total:>+12,.4f}")
     print()
 
-    # --- hedge effectiveness vs vault directional ---
+    # --- hedge effectiveness vs vault non-rebalanced exposure ---
     if not ss.empty:
         P0 = ss['fair_value'].iloc[0]
         P1 = ss['fair_value'].iloc[-1]
-        b0 = ss['base_balance'].iloc[0]
         tvl0 = ss['tvl'].iloc[0]
         vault_m2m_pnl = ss['tvl'].iloc[-1] - tvl0
 
-        # The hedge shorts the cumulative base the vault has traded away from its initial
-        # inventory. At each moment it holds -hedge_ratio · (b_t - b_0) base tokens.
-        # Its PnL over the period:
-        #   expected_hedge_pnl = ∫ -hedge_ratio · (b_t - b_0) · dP
-        # Identity: at 100% coverage, this equals HODL + Spread − Vault (i.e. the
-        # rebalancing loss shown in the vault report, with opposite display sign).
-        b_traded = ss['base_balance'] - b0
+        # The hedge is meant to cancel the vault's non-rebalanced exposure
+        # (deviation from $x=$y), not its cumulative trading activity.
+        #   non_rebal_base(t)       = (b_t·P_t - q_t) / (2·P_t)
+        #   target hedge position   = -hedge_ratio · non_rebal_base(t)
+        #   expected_hedge_pnl_full = -∫ non_rebal_base · dP   (at 100% coverage)
+        non_rebal_base = (ss['base_balance'] * ss['fair_value'] - ss['quote_balance']) \
+                         / (2 * ss['fair_value'])
         dP = ss['fair_value'].diff().shift(-1)
-        expected_hedge_pnl_full = -(b_traded * dP).sum()          # at 100% coverage
+        expected_hedge_pnl_full = -(non_rebal_base * dP).sum()
         expected_hedge_pnl      = expected_hedge_pnl_full * hedge_ratio
-        avg_abs_traded_usd      = (b_traded.abs() * ss['fair_value']).mean()
+        avg_abs_non_rebal_usd   = (non_rebal_base.abs() * ss['fair_value']).mean()
 
         print(f"  {'HEDGE EFFECTIVENESS':─<{w-2}}")
         print(f"  Vault m2m PnL:                   ${vault_m2m_pnl:>+12,.2f}")
-        print(f"  Avg |cumulative traded| ($):     ${avg_abs_traded_usd:>12,.2f}  (time-avg dollar exposure to hedge)")
-        print(f"  Expected hedge PnL (full):       ${expected_hedge_pnl_full:>+12,.2f}  (= −∫(b_t−b₀)·dP, equals vault Rebalancing Loss)")
+        print(f"  Avg |non-rebal exposure| ($):    ${avg_abs_non_rebal_usd:>12,.2f}  (deviation from $x=$y)")
+        print(f"  Expected hedge PnL (full):       ${expected_hedge_pnl_full:>+12,.2f}  (= −∫ non_rebal_base·dP)")
         ratio_label = f"{hedge_ratio*100:.1f}% coverage" if hedge_ratio != 1.0 else "full coverage"
         print(f"  Expected hedge PnL ({ratio_label:>14}): ${expected_hedge_pnl:>+12,.2f}")
         effectiveness = (total / expected_hedge_pnl * 100) if abs(expected_hedge_pnl) > 1e-6 else float('nan')
@@ -295,7 +294,8 @@ def print_vault_performance_report(strategy_state, markouts_df):
     print(f"  Spread capture (5s markout): ${spread_pnl:>+12,.4f}   ({spread_pnl/tvl0*100:+.4f}% of TVL)")
     print(f"  Rebalancing loss:            ${-rebalancing_loss:>+12,.4f}   ({-rebalancing_loss/tvl0*100:+.4f}% — cost of $x=$y)")
     print(f"  ── Total vault PnL (m2m):    ${vault_pnl:>+12,.4f}   ({vault_pnl/tvl0*100:+.4f}% of TVL)")
-    print(f"  Note: hedge targets the non-rebalanced exposure (pos·tvl/2), not HODL.")
+    print(f"  Note: a perfect hedge cancels the non-rebalanced exposure's price-move PnL;")
+    print(f"        the rebalancing loss is residual and is NOT offset by the hedge.")
     print()
 
     print(f"  {'BENCHMARKS':─<{w-2}}")
