@@ -2,7 +2,11 @@
 Plot cumulative hedge PnL (target vs actual) alongside unhedged position,
 to localize where the hedge miss bleeds money.
 
-Uses data/hedge_tracking_YYYYMMDD.csv produced by analyze_hedge_intent.py.
+Reads strategy_state and hl_fills CSVs directly — no orders data needed.
+
+Inputs:
+  data/{market}_vault_strategy_state_YYYYMMDD.csv
+  data/hl_fills_YYYYMMDD.csv
 
 Usage:
   python scripts/plot_hedge_pnl_breakdown.py --date 20260421
@@ -15,6 +19,7 @@ import re
 import sys
 from datetime import timedelta
 
+import numpy as np
 import pandas as pd
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
@@ -41,6 +46,9 @@ def parse_hhmm(date_str: str, hhmm: str) -> pd.Timestamp:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--date', required=True, metavar='YYYYMMDD')
+    parser.add_argument('--market', default='MONUSDC')
+    parser.add_argument('--hedge-ratio', type=float, default=1.0,
+                        help='Fraction of vault non-rebalanced exposure being hedged.')
     parser.add_argument('--last', metavar='DURATION',
                         help='Only plot the trailing N units (e.g. 30m, 1h, 6h).')
     parser.add_argument('--from', dest='from_', metavar='HH:MM',
@@ -54,16 +62,50 @@ def main():
     if bool(args.from_) ^ bool(args.to):
         parser.error("--from and --to must be provided together.")
 
-    csv_path = os.path.join(OUTPUT_DIR, f'hedge_tracking_{args.date}.csv')
-    if not os.path.exists(csv_path):
-        print(f"Missing input: {csv_path}", file=sys.stderr)
-        sys.exit(1)
+    ss_path    = os.path.join(OUTPUT_DIR, f'{args.market}_vault_strategy_state_{args.date}.csv')
+    fills_path = os.path.join(OUTPUT_DIR, f'hl_fills_{args.date}.csv')
+    for p in (ss_path, fills_path):
+        if not os.path.exists(p):
+            print(f"Missing input: {p}", file=sys.stderr)
+            sys.exit(1)
 
-    df = pd.read_csv(csv_path)
-    df['time'] = pd.to_datetime(df['time'], format='mixed').dt.tz_localize(None)
-    df = df.sort_values('time').drop_duplicates('time', keep='last').set_index('time')
+    ss = pd.read_csv(ss_path)
+    ss['time'] = pd.to_datetime(ss['time'], format='mixed').dt.tz_localize(None)
+    ss = (ss.sort_values('time')
+            .drop_duplicates('time', keep='last')
+            .set_index('time')
+            .dropna(subset=['base_balance', 'quote_balance', 'fair_value']))
 
-    # Apply window filter before computing PnL so cumulative resets at window start.
+    non_rebal_base = (ss['base_balance'] * ss['fair_value'] - ss['quote_balance']) \
+                     / (2 * ss['fair_value'])
+    expected_pos = -non_rebal_base * args.hedge_ratio
+
+    f = pd.read_csv(fills_path)
+    f['time'] = pd.to_datetime(f['time'], format='mixed').dt.tz_localize(None)
+    f = f.sort_values('time').reset_index(drop=True)
+    f['signed'] = np.where(f['side'] == 'buy', f['size'], -f['size']).astype(float)
+
+    # HL's start_pos on the first fill is the position BEFORE that fill, i.e.
+    # the position the bot opened the day with. Initializing with it fixes the
+    # mark-to-market PnL and the unhedged diagnostic (otherwise a carried-over
+    # short or long is invisible to cumsum-from-zero).
+    start_pos = float(f['start_pos'].iloc[0]) if len(f) else 0.0
+
+    actual_cum = f.set_index('time')['signed'].cumsum()
+    actual_cum = actual_cum[~actual_cum.index.duplicated(keep='last')].sort_index()
+    actual_pos = actual_cum.reindex(ss.index, method='ffill').fillna(0) + start_pos
+
+    fee_cum = f.set_index('time')['fee'].cumsum()
+    fee_cum = fee_cum[~fee_cum.index.duplicated(keep='last')].sort_index()
+    fee_cum = fee_cum.reindex(ss.index, method='ffill').fillna(0)
+
+    df = pd.DataFrame({
+        'fair_value':   ss['fair_value'],
+        'expected_pos': expected_pos,
+        'actual_pos':   actual_pos,
+        'cum_fees':     fee_cum,
+    })
+
     window_label = ''
     if args.last:
         delta = parse_duration(args.last)
@@ -81,15 +123,27 @@ def main():
         print("No data in requested window.", file=sys.stderr)
         sys.exit(1)
 
+    # Rebase fees to 0 at window start so --last / --from show only
+    # fees accrued inside the window.
+    df['cum_fees'] = df['cum_fees'] - df['cum_fees'].iloc[0]
+    df['fee_incr'] = df['cum_fees'].diff().fillna(0.0)
+
+    # For gross PnL we want the position *going into* each interval; at t=0
+    # that's the position at window start (= actual_pos.iloc[0]), not 0.
     dP = df['fair_value'].diff().fillna(0.0)
-    df['cum_target_pnl'] = (df['expected_pos'].shift().fillna(0.0) * dP).cumsum()
-    df['cum_actual_pnl'] = (df['actual_pos'].shift().fillna(0.0)   * dP).cumsum()
+    pos_prev_expected = df['expected_pos'].shift().fillna(df['expected_pos'].iloc[0])
+    pos_prev_actual   = df['actual_pos'].shift().fillna(df['actual_pos'].iloc[0])
+
+    df['target_pnl_incr'] = pos_prev_expected * dP
+    df['gross_pnl_incr']  = pos_prev_actual   * dP
+    df['net_pnl_incr']    = df['gross_pnl_incr'] - df['fee_incr']
+
+    df['cum_target_pnl'] = df['target_pnl_incr'].cumsum()
+    df['cum_gross_pnl']  = df['gross_pnl_incr'].cumsum()
+    df['cum_net_pnl']    = df['net_pnl_incr'].cumsum()
+
     df['unhedged'] = df['actual_pos'] - df['expected_pos']
 
-    df['target_pnl_incr'] = df['expected_pos'].shift().fillna(0.0) * dP
-    df['actual_pnl_incr'] = df['actual_pos'].shift().fillna(0.0)   * dP
-
-    # Bucket size scales with window length: ≤2h → 5-min buckets, ≤24h → 1h, else 1h
     span = df.index.max() - df.index.min()
     if span <= timedelta(hours=2):
         rule, bucket_fmt = '5min', '%H:%M'
@@ -98,36 +152,43 @@ def main():
 
     buckets = df.resample(rule).agg(
         fv_start=('fair_value', 'first'),
-        fv_end=('fair_value', 'last'),
         avg_unhedged=('unhedged', 'mean'),
         target_pnl=('target_pnl_incr', 'sum'),
-        actual_pnl=('actual_pnl_incr', 'sum'),
+        gross_pnl=('gross_pnl_incr', 'sum'),
+        fees=('fee_incr', 'sum'),
     )
-    buckets['miss'] = buckets['actual_pnl'] - buckets['target_pnl']
+    buckets['net_pnl'] = buckets['gross_pnl'] - buckets['fees']
+    buckets['miss'] = buckets['net_pnl'] - buckets['target_pnl']
 
     total_target = df['cum_target_pnl'].iloc[-1]
-    total_actual = df['cum_actual_pnl'].iloc[-1]
-    total_miss = total_actual - total_target
+    total_gross  = df['cum_gross_pnl'].iloc[-1]
+    total_net    = df['cum_net_pnl'].iloc[-1]
+    total_fees   = df['cum_fees'].iloc[-1]
+    total_miss   = total_net - total_target
 
-    w = 96
+    w = 108
     header_label = f" PnL ATTRIBUTION ({rule} buckets){window_label} "
     print()
     print(f"  {header_label:═^{w}}")
-    print(f"  {'bucket':<8}{'fv start':>12}{'fv end':>12}"
-          f"{'avg unhedged':>16}{'target $':>12}{'actual $':>12}{'miss $':>12}")
+    print(f"  {'bucket':<8}{'fv':>10}{'avg unhedged':>16}"
+          f"{'target $':>12}{'gross $':>12}{'fees $':>10}{'net $':>12}{'miss $':>12}")
     print(f"  {'-'*(w-2)}")
     for ts, row in buckets.iterrows():
         if pd.isna(row['fv_start']):
             continue
         print(f"  {ts.strftime(bucket_fmt):<8}"
-              f"{row['fv_start']:>12.6f}{row['fv_end']:>12.6f}"
+              f"{row['fv_start']:>10.6f}"
               f"{row['avg_unhedged']:>16,.0f}"
-              f"{row['target_pnl']:>12,.2f}{row['actual_pnl']:>12,.2f}"
+              f"{row['target_pnl']:>12,.2f}{row['gross_pnl']:>12,.2f}"
+              f"{row['fees']:>10,.2f}{row['net_pnl']:>12,.2f}"
               f"{row['miss']:>12,.2f}")
     print(f"  {'-'*(w-2)}")
-    print(f"  {'TOTAL':<8}{'':>12}{'':>12}{'':>16}"
-          f"{total_target:>12,.2f}{total_actual:>12,.2f}{total_miss:>12,.2f}")
+    print(f"  {'TOTAL':<8}{'':>10}{'':>16}"
+          f"{total_target:>12,.2f}{total_gross:>12,.2f}"
+          f"{total_fees:>10,.2f}{total_net:>12,.2f}"
+          f"{total_miss:>12,.2f}")
     print(f"  {'═'*(w-2)}")
+    print(f"  opening position: {start_pos:+,.0f} tokens @ {df['fair_value'].iloc[0]:.6f}")
     print()
 
     import matplotlib.pyplot as plt
@@ -136,16 +197,18 @@ def main():
 
     ax[0].plot(df.index, df['cum_target_pnl'], label='target (perfect hedge)',
                color='tab:green', lw=1.5)
-    ax[0].plot(df.index, df['cum_actual_pnl'], label='actual',
+    ax[0].plot(df.index, df['cum_gross_pnl'], label='gross (∫ pos · dP)',
+               color='tab:orange', lw=1.2, alpha=0.9)
+    ax[0].plot(df.index, df['cum_net_pnl'], label='net (gross − fees)',
                color='tab:red', lw=1.5)
-    ax[0].fill_between(df.index, df['cum_target_pnl'], df['cum_actual_pnl'],
-                       where=(df['cum_actual_pnl'] < df['cum_target_pnl']),
-                       color='tab:red', alpha=0.15, interpolate=True, label='miss (actual < target)')
+    ax[0].fill_between(df.index, df['cum_target_pnl'], df['cum_net_pnl'],
+                       where=(df['cum_net_pnl'] < df['cum_target_pnl']),
+                       color='tab:red', alpha=0.15, interpolate=True, label='miss (net < target)')
     ax[0].axhline(0, color='gray', lw=0.5)
     ax[0].set_ylabel('Cumulative hedge PnL ($)')
     ax[0].set_title(f'Hedge PnL breakdown — {args.date}{window_label}  '
-                    f'(target ${total_target:+,.0f}  /  actual ${total_actual:+,.0f}  '
-                    f'/  miss ${total_miss:+,.0f})')
+                    f'(target ${total_target:+,.0f}  /  gross ${total_gross:+,.0f}  '
+                    f'/  net ${total_net:+,.0f}  /  miss ${total_miss:+,.0f})')
     ax[0].legend(loc='best')
     ax[0].grid(alpha=0.3)
 
