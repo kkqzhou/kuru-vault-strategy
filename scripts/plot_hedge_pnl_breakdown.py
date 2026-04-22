@@ -100,10 +100,11 @@ def main():
     fee_cum = fee_cum.reindex(ss.index, method='ffill').fillna(0)
 
     df = pd.DataFrame({
-        'fair_value':   ss['fair_value'],
-        'expected_pos': expected_pos,
-        'actual_pos':   actual_pos,
-        'cum_fees':     fee_cum,
+        'fair_value':     ss['fair_value'],
+        'expected_pos':   expected_pos,
+        'actual_pos':     actual_pos,
+        'non_rebal_base': non_rebal_base,
+        'cum_fees':       fee_cum,
     })
 
     window_label = ''
@@ -212,7 +213,11 @@ def main():
     ax[0].legend(loc='best')
     ax[0].grid(alpha=0.3)
 
-    ax[1].plot(df.index, df['unhedged'], color='black', lw=0.8)
+    ax[1].plot(df.index, df['unhedged'], color='black', lw=0.8, label='unhedged (actual − expected)')
+    ax[1].plot(df.index, df['non_rebal_base'], color='tab:blue', lw=1.0, alpha=0.9,
+               label='vault non-rebal exposure (b·P − q)/(2P)')
+    ax[1].plot(df.index, df['actual_pos'], color='tab:orange', lw=1.0, alpha=0.9,
+               label='hedger open position (HL)')
     ax[1].fill_between(df.index, df['unhedged'], 0,
                        where=(df['unhedged'] < 0),
                        color='tab:red', alpha=0.25, interpolate=True, label='over-short')
@@ -220,8 +225,8 @@ def main():
                        where=(df['unhedged'] > 0),
                        color='tab:green', alpha=0.25, interpolate=True, label='over-long')
     ax[1].axhline(0, color='gray', lw=0.5)
-    ax[1].set_ylabel('Unhedged = actual − expected (tokens)')
-    ax[1].legend(loc='best')
+    ax[1].set_ylabel('Position (tokens)')
+    ax[1].legend(loc='best', fontsize=8)
     ax[1].grid(alpha=0.3)
 
     ax[2].plot(df.index, df['fair_value'], color='tab:blue', lw=1.0)

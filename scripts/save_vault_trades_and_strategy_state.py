@@ -7,7 +7,7 @@ dotenv.load_dotenv()
 
 import numpy as np
 import os
-sys.path.append('..')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.kuru import client, dune_client, get_kuru_vault_token_supply, VAULT_TOKEN_ADDRESSES
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
@@ -71,22 +71,57 @@ def get_vault_strategy_state(start_date, end_date, market='MONUSDC'):
         df['perf'] = df['perf'] / df['perf'].iloc[0]
     return df.set_index('time').sort_index()
 
-def save_data(start, end, market):
+def _load_existing(path):
+    """Return (df indexed by time, max_ts) or (None, None) if file missing/empty."""
+    if not os.path.exists(path):
+        return None, None
+    df = pd.read_csv(path)
+    if df.empty or 'time' not in df.columns:
+        return None, None
+    df['time'] = pd.to_datetime(df['time'])
+    df = df.set_index('time').sort_index()
+    return df, df.index.max()
+
+
+def _merge_and_write(existing, new, path, label):
+    if existing is not None and not existing.empty:
+        combined = pd.concat([existing, new])
+        combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+    else:
+        combined = new
+    combined.to_csv(path)
+    print(f"Saved {len(combined)} {label} rows to {path}")
+
+
+def save_data(start, end, market, force=False):
     date_str = pd.Timestamp(start).strftime('%Y%m%d')
+    trades_output          = os.path.join(OUTPUT_DIR, f'{market}_vault_trades_{date_str}.csv')
+    strategy_state_output  = os.path.join(OUTPUT_DIR, f'{market}_vault_strategy_state_{date_str}.csv')
 
-    trades_df = get_vault_trades(start, end, market=market)
-    trades_output = os.path.join(OUTPUT_DIR, f'{market}_vault_trades_{date_str}.csv')
-    trades_df.to_csv(trades_output)
-    print(f"Saved vault trades to {trades_output}")
+    # ── Trades ──────────────────────────────────────────────────────────────
+    existing_trades, trades_last = (None, None) if force else _load_existing(trades_output)
+    trades_start = trades_last if trades_last is not None else start
+    if trades_last is not None:
+        print(f"Trades: resuming from {trades_start} (existing file has data through that point)")
+    if trades_start < end:
+        new_trades = get_vault_trades(trades_start, end, market=market)
+        _merge_and_write(existing_trades, new_trades, trades_output, "vault trade")
+    else:
+        print(f"Trades: already up to date through {trades_start}, skipping fetch")
 
-    df = get_vault_strategy_state(start, end, market=market)
-    strategy_state_df = df.resample('0.4S', closed='right', label='right').last()
-    strategy_state_df['tvl'] = strategy_state_df['base_balance'] * strategy_state_df['fair_value'] + strategy_state_df['quote_balance']
-    strategy_state_df['pos'] = (2 * strategy_state_df['base_balance'] * strategy_state_df['fair_value'] / strategy_state_df['tvl'] - 1)
-
-    strategy_state_output = os.path.join(OUTPUT_DIR, f'{market}_vault_strategy_state_{date_str}.csv')
-    strategy_state_df.to_csv(strategy_state_output)
-    print(f"Saved vault strategy state to {strategy_state_output}")
+    # ── Strategy state ──────────────────────────────────────────────────────
+    existing_ss, ss_last = (None, None) if force else _load_existing(strategy_state_output)
+    ss_start = ss_last if ss_last is not None else start
+    if ss_last is not None:
+        print(f"Strategy state: resuming from {ss_start}")
+    if ss_start < end:
+        df = get_vault_strategy_state(ss_start, end, market=market)
+        new_ss = df.resample('0.4S', closed='right', label='right').last()
+        new_ss['tvl'] = new_ss['base_balance'] * new_ss['fair_value'] + new_ss['quote_balance']
+        new_ss['pos'] = (2 * new_ss['base_balance'] * new_ss['fair_value'] / new_ss['tvl'] - 1)
+        _merge_and_write(existing_ss, new_ss, strategy_state_output, "strategy state")
+    else:
+        print(f"Strategy state: already up to date through {ss_start}, skipping fetch")
 
 if __name__ == '__main__':
     import argparse
@@ -95,6 +130,8 @@ if __name__ == '__main__':
     parser.add_argument('--from', dest='from_ts', metavar='TIMESTAMP', help='Start timestamp, e.g. "2025-04-11 08:00:00"')
     parser.add_argument('--to', dest='to_ts', metavar='TIMESTAMP', help='End timestamp, e.g. "2025-04-11 16:00:00"')
     parser.add_argument('--market', default='MONUSDC', help='Market (default: MONUSDC)')
+    parser.add_argument('--force', action='store_true',
+                        help='Refetch from scratch even if the output CSVs already exist.')
     args = parser.parse_args()
 
     if args.date and (args.from_ts or args.to_ts):
@@ -112,4 +149,4 @@ if __name__ == '__main__':
         start = pd.Timestamp(args.from_ts)
         end = pd.Timestamp(args.to_ts)
 
-    save_data(start, end, args.market)
+    save_data(start, end, args.market, force=args.force)
