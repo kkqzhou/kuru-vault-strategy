@@ -7,8 +7,7 @@ import sys
 import dotenv
 dotenv.load_dotenv()
 
-import sys
-sys.path.append('..')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.kuru import get_kuru_vault_token_supply, VAULT_TOKEN_ADDRESSES
 from lib.trading import compute_markouts, print_trading_report, print_vault_performance_report

@@ -12,6 +12,7 @@ Usage:
   python scripts/plot_hedge_pnl_breakdown.py --date 20260421
   python scripts/plot_hedge_pnl_breakdown.py --date 20260421 --last 1h
   python scripts/plot_hedge_pnl_breakdown.py --date 20260421 --from 10:00 --to 11:00
+  python scripts/plot_hedge_pnl_breakdown.py --date 20260421 --show
 """
 import argparse
 import os
@@ -43,6 +44,16 @@ def parse_hhmm(date_str: str, hhmm: str) -> pd.Timestamp:
     return day + timedelta(hours=h, minutes=mm, seconds=ss)
 
 
+def choose_slope_window(span: timedelta) -> str:
+    if span <= timedelta(hours=2):
+        return '5min'
+    if span <= timedelta(hours=12):
+        return '15min'
+    if span <= timedelta(days=2):
+        return '1h'
+    return '4h'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--date', required=True, metavar='YYYYMMDD')
@@ -55,6 +66,8 @@ def main():
                         help='Start of window on the given date.')
     parser.add_argument('--to', metavar='HH:MM',
                         help='End of window on the given date.')
+    parser.add_argument('--show', action='store_true',
+                        help='Open an interactive Matplotlib window with hover tooltips.')
     args = parser.parse_args()
 
     if args.last and (args.from_ or args.to):
@@ -144,6 +157,28 @@ def main():
     df['cum_net_pnl']    = df['net_pnl_incr'].cumsum()
 
     df['unhedged'] = df['actual_pos'] - df['expected_pos']
+    df['gross_minus_target'] = df['cum_gross_pnl'] - df['cum_target_pnl']
+    df['net_minus_target'] = df['cum_net_pnl'] - df['cum_target_pnl']
+    df['target_minus_gross'] = df['cum_target_pnl'] - df['cum_gross_pnl']
+    df['target_minus_net'] = df['cum_target_pnl'] - df['cum_net_pnl']
+    df['abs_target_minus_net'] = df['target_minus_net'].abs()
+
+    dt_hours = df.index.to_series().diff().dt.total_seconds().div(3600.0)
+    dt_hours = dt_hours.replace(0, np.nan)
+    df['target_minus_gross_slope_per_hour'] = df['target_minus_gross'].diff().div(dt_hours)
+    df['target_minus_net_slope_per_hour'] = df['target_minus_net'].diff().div(dt_hours)
+
+    slope_window = choose_slope_window(df.index.max() - df.index.min())
+    df['target_minus_gross_slope_per_hour_smooth'] = (
+        df['target_minus_gross_slope_per_hour']
+        .rolling(slope_window, min_periods=2)
+        .mean()
+    )
+    df['target_minus_net_slope_per_hour_smooth'] = (
+        df['target_minus_net_slope_per_hour']
+        .rolling(slope_window, min_periods=2)
+        .mean()
+    )
 
     span = df.index.max() - df.index.min()
     if span <= timedelta(hours=2):
@@ -192,9 +227,12 @@ def main():
     print(f"  opening position: {start_pos:+,.0f} tokens @ {df['fair_value'].iloc[0]:.6f}")
     print()
 
+    import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(3, 1, figsize=(14, 10), sharex=True,
-                           gridspec_kw={'height_ratios': [3, 2, 1]})
+
+    fig, ax = plt.subplots(5, 1, figsize=(15, 14), sharex=True,
+                           gridspec_kw={'height_ratios': [3.2, 2.1, 1.8, 1.8, 1.0]})
+    axes = list(ax)
 
     ax[0].plot(df.index, df['cum_target_pnl'], label='target (perfect hedge)',
                color='tab:green', lw=1.5)
@@ -229,10 +267,103 @@ def main():
     ax[1].legend(loc='best', fontsize=8)
     ax[1].grid(alpha=0.3)
 
-    ax[2].plot(df.index, df['fair_value'], color='tab:blue', lw=1.0)
-    ax[2].set_ylabel('Fair value')
-    ax[2].set_xlabel('Time (UTC)')
+    ax[2].plot(df.index, df['target_minus_gross'], color='tab:orange', lw=1.1,
+               label='target - gross')
+    ax[2].plot(df.index, df['target_minus_net'], color='tab:red', lw=1.4,
+               label='target - net')
+    ax[2].plot(df.index, df['abs_target_minus_net'], color='tab:blue', lw=1.0,
+               linestyle='--', label='|target - net|')
+    ax[2].fill_between(df.index, df['target_minus_net'], 0,
+                       where=(df['target_minus_net'] > 0),
+                       color='tab:red', alpha=0.16, interpolate=True, label='underperforming target')
+    ax[2].axhline(0, color='gray', lw=0.5)
+    ax[2].set_ylabel('Divergence ($)')
+    ax[2].legend(loc='best', fontsize=8)
     ax[2].grid(alpha=0.3)
+
+    ax[3].plot(df.index, df['target_minus_gross_slope_per_hour_smooth'],
+               color='tab:orange', lw=1.0, alpha=0.9,
+               label=f'slope(target - gross) [{slope_window} mean]')
+    ax[3].plot(df.index, df['target_minus_net_slope_per_hour_smooth'],
+               color='tab:red', lw=1.3,
+               label=f'slope(target - net) [{slope_window} mean]')
+    ax[3].axhline(0, color='gray', lw=0.5)
+    ax[3].set_ylabel('Slope ($/hr)')
+    ax[3].legend(loc='best', fontsize=8)
+    ax[3].grid(alpha=0.3)
+
+    ax[4].plot(df.index, df['fair_value'], color='tab:blue', lw=1.0)
+    ax[4].set_ylabel('Fair value')
+    ax[4].set_xlabel('Time (UTC)')
+    ax[4].grid(alpha=0.3)
+
+    if args.show:
+        x_values = mdates.date2num(df.index.to_pydatetime())
+        hover_line_by_ax = {
+            axis: axis.axvline(df.index[0], color='0.35', lw=0.8, ls='--', alpha=0.7, visible=False)
+            for axis in axes
+        }
+        hover_note = ax[0].annotate(
+            '',
+            xy=(0, 0),
+            xytext=(12, 12),
+            textcoords='offset points',
+            bbox={'boxstyle': 'round', 'fc': 'white', 'ec': '0.5', 'alpha': 0.95},
+            fontsize=8.5,
+        )
+        hover_note.set_visible(False)
+
+        def fmt_hover_value(value: float, decimals: int = 2, signed: bool = True, suffix: str = '') -> str:
+            if pd.isna(value):
+                return 'n/a'
+            fmt = f"{{:{'+' if signed else ''},.{decimals}f}}"
+            return f"{fmt.format(float(value))}{suffix}"
+
+        def format_hover(idx: int) -> str:
+            ts = df.index[idx]
+            return '\n'.join([
+                ts.strftime('%Y-%m-%d %H:%M:%S'),
+                f"target: {fmt_hover_value(df['cum_target_pnl'].iloc[idx])}",
+                f"gross:  {fmt_hover_value(df['cum_gross_pnl'].iloc[idx])}",
+                f"net:    {fmt_hover_value(df['cum_net_pnl'].iloc[idx])}",
+                f"target-gross: {fmt_hover_value(df['target_minus_gross'].iloc[idx])}",
+                f"target-net:   {fmt_hover_value(df['target_minus_net'].iloc[idx])}",
+                f"|target-net|: {fmt_hover_value(df['abs_target_minus_net'].iloc[idx], signed=False)}",
+                f"slope(target-net): {fmt_hover_value(df['target_minus_net_slope_per_hour_smooth'].iloc[idx], suffix=' $/hr')}",
+                f"unhedged: {fmt_hover_value(df['unhedged'].iloc[idx], decimals=0, suffix=' tokens')}",
+                f"fair value: {df['fair_value'].iloc[idx]:.6f}",
+            ])
+
+        def on_move(event):
+            if event.inaxes not in axes or event.xdata is None:
+                if hover_note.get_visible():
+                    hover_note.set_visible(False)
+                    for line in hover_line_by_ax.values():
+                        line.set_visible(False)
+                    fig.canvas.draw_idle()
+                return
+
+            idx = np.searchsorted(x_values, event.xdata)
+            if idx <= 0:
+                nearest = 0
+            elif idx >= len(x_values):
+                nearest = len(x_values) - 1
+            else:
+                prev_idx = idx - 1
+                nearest = idx if abs(x_values[idx] - event.xdata) < abs(x_values[prev_idx] - event.xdata) else prev_idx
+
+            x = df.index[nearest]
+            y = df['cum_net_pnl'].iloc[nearest]
+            for line in hover_line_by_ax.values():
+                line.set_xdata([x, x])
+                line.set_visible(True)
+
+            hover_note.xy = (x, y)
+            hover_note.set_text(format_hover(nearest))
+            hover_note.set_visible(True)
+            fig.canvas.draw_idle()
+
+        fig.canvas.mpl_connect('motion_notify_event', on_move)
 
     suffix = ''
     if args.last:
@@ -243,6 +374,11 @@ def main():
     fig.tight_layout()
     fig.savefig(plot_path, dpi=120)
     print(f"Wrote plot to {plot_path}")
+    if args.show:
+        print("Opening interactive plot window with hover tooltips...")
+        plt.show()
+    else:
+        print("Run with --show to inspect exact values by hovering in the interactive plot window.")
 
 
 if __name__ == '__main__':

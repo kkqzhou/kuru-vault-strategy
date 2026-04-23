@@ -24,6 +24,8 @@ DEFAULT_ADDRESS = "0xa59c4CB5C24983d1F0076a52d4F0e95cc5013Df5"
 HL_API_URL = os.getenv("HL_API_URL", "https://api.hyperliquid.xyz")
 INFO_URL = f"{HL_API_URL}/info"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
+FILL_PAGE_LIMIT = 2000
+MAX_RECENT_FILLS_AVAILABLE = 10000
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
@@ -68,14 +70,92 @@ def fetch_open_orders(address: str) -> list[dict]:
     return hl_post({"type": "openOrders", "user": address})
 
 
+def fill_dedupe_key(fill: dict) -> tuple:
+    return (
+        fill.get("tid"),
+        fill.get("hash"),
+        fill.get("oid"),
+        fill.get("time"),
+        fill.get("coin"),
+        fill.get("px"),
+        fill.get("sz"),
+        fill.get("side"),
+    )
+
+
 def fetch_fills_by_time(address: str, after: datetime, before: datetime) -> list[dict]:
-    """Fetch fills using the userFillsByTime endpoint (ms timestamps)."""
-    return hl_post({
-        "type": "userFillsByTime",
-        "user": address,
-        "startTime": to_ms(after),
-        "endTime": to_ms(before),
-    })
+    """
+    Fetch fills using the userFillsByTime endpoint (ms timestamps).
+
+    Hyperliquid caps each response at 2000 fills. In practice the endpoint can
+    behave like "first 2000 fills in the requested time range", so we page
+    forward using the newest fill we have already seen rather than relying on
+    the response being reverse-chronological.
+    """
+    start_ms = to_ms(after)
+    final_end_ms = to_ms(before)
+    all_fills: list[dict] = []
+    seen: set[tuple] = set()
+    page_num = 0
+    hit_recent_cap = False
+
+    while start_ms <= final_end_ms:
+        page_num += 1
+        page = hl_post({
+            "type": "userFillsByTime",
+            "user": address,
+            "startTime": start_ms,
+            "endTime": final_end_ms,
+        })
+
+        if not isinstance(page, list):
+            raise TypeError(f"Expected list of fills, got {type(page).__name__}")
+        if not page:
+            break
+
+        page = sorted(page, key=lambda row: int(row.get("time", 0)), reverse=True)
+        added = 0
+        for fill in page:
+            key = fill_dedupe_key(fill)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_fills.append(fill)
+            added += 1
+
+        oldest_ms = min(int(fill.get("time", 0)) for fill in page)
+        newest_ms = max(int(fill.get("time", 0)) for fill in page)
+        oldest_dt = datetime.fromtimestamp(oldest_ms / 1000, tz=timezone.utc).isoformat()
+        newest_dt = datetime.fromtimestamp(newest_ms / 1000, tz=timezone.utc).isoformat()
+        print(
+            f"  fills page {page_num}: received {len(page)} rows "
+            f"({added} new), range {oldest_dt} -> {newest_dt}"
+        )
+
+        if len(page) < FILL_PAGE_LIMIT:
+            break
+
+        if len(all_fills) >= MAX_RECENT_FILLS_AVAILABLE:
+            hit_recent_cap = True
+            break
+
+        next_start_ms = newest_ms + 1
+        if next_start_ms <= start_ms:
+            # Defensive guard: avoid an infinite loop if the API does not move forward.
+            break
+        start_ms = next_start_ms
+
+    all_fills.sort(key=lambda row: int(row.get("time", 0)))
+
+    if hit_recent_cap:
+        earliest_dt = datetime.fromtimestamp(to_ms(after) / 1000, tz=timezone.utc).isoformat()
+        print(
+            "Warning: reached Hyperliquid's recent-fill ceiling while paginating. "
+            f"The API only exposes the {MAX_RECENT_FILLS_AVAILABLE} most recent fills, "
+            f"so older fills at or before {earliest_dt} may be unavailable."
+        )
+
+    return all_fills
 
 
 # ── Display / serialise ───────────────────────────────────────────────────────

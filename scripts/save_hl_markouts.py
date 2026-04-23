@@ -5,7 +5,7 @@ import dotenv
 dotenv.load_dotenv()
 
 import os
-sys.path.append('..')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.trading import compute_markouts, print_trading_report, print_hl_hedge_report
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
