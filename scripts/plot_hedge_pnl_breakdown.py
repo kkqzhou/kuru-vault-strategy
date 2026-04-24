@@ -92,11 +92,18 @@ def main():
     non_rebal_base = (ss['base_balance'] * ss['fair_value'] - ss['quote_balance']) \
                      / (2 * ss['fair_value'])
     expected_pos = -non_rebal_base * args.hedge_ratio
+    base_value = ss['base_balance'] * ss['fair_value']
+    total_value = base_value + ss['quote_balance']
+    vault_pos_ratio = (base_value - ss['quote_balance']) / total_value.replace(0, np.nan)
 
     f = pd.read_csv(fills_path)
     f['time'] = pd.to_datetime(f['time'], format='mixed').dt.tz_localize(None)
     f = f.sort_values('time').reset_index(drop=True)
     f['signed'] = np.where(f['side'] == 'buy', f['size'], -f['size']).astype(float)
+    f['fee'] = f['fee'].astype(float)
+    f['crossed'] = f['crossed'].map(lambda x: str(x).strip().lower() == 'true')
+    f['maker_fee'] = np.where(f['crossed'], 0.0, f['fee'])
+    f['taker_fee'] = np.where(f['crossed'], f['fee'], 0.0)
 
     # HL's start_pos on the first fill is the position BEFORE that fill, i.e.
     # the position the bot opened the day with. Initializing with it fixes the
@@ -112,12 +119,23 @@ def main():
     fee_cum = fee_cum[~fee_cum.index.duplicated(keep='last')].sort_index()
     fee_cum = fee_cum.reindex(ss.index, method='ffill').fillna(0)
 
+    maker_fee_cum = f.set_index('time')['maker_fee'].cumsum()
+    maker_fee_cum = maker_fee_cum[~maker_fee_cum.index.duplicated(keep='last')].sort_index()
+    maker_fee_cum = maker_fee_cum.reindex(ss.index, method='ffill').fillna(0)
+
+    taker_fee_cum = f.set_index('time')['taker_fee'].cumsum()
+    taker_fee_cum = taker_fee_cum[~taker_fee_cum.index.duplicated(keep='last')].sort_index()
+    taker_fee_cum = taker_fee_cum.reindex(ss.index, method='ffill').fillna(0)
+
     df = pd.DataFrame({
         'fair_value':     ss['fair_value'],
         'expected_pos':   expected_pos,
         'actual_pos':     actual_pos,
         'non_rebal_base': non_rebal_base,
+        'vault_pos_ratio': vault_pos_ratio,
         'cum_fees':       fee_cum,
+        'cum_maker_fees': maker_fee_cum,
+        'cum_taker_fees': taker_fee_cum,
     })
 
     window_label = ''
@@ -137,10 +155,16 @@ def main():
         print("No data in requested window.", file=sys.stderr)
         sys.exit(1)
 
+    f = f[(f['time'] >= df.index.min()) & (f['time'] <= df.index.max())].copy()
+
     # Rebase fees to 0 at window start so --last / --from show only
     # fees accrued inside the window.
     df['cum_fees'] = df['cum_fees'] - df['cum_fees'].iloc[0]
+    df['cum_maker_fees'] = df['cum_maker_fees'] - df['cum_maker_fees'].iloc[0]
+    df['cum_taker_fees'] = df['cum_taker_fees'] - df['cum_taker_fees'].iloc[0]
     df['fee_incr'] = df['cum_fees'].diff().fillna(0.0)
+    df['maker_fee_incr'] = df['cum_maker_fees'].diff().fillna(0.0)
+    df['taker_fee_incr'] = df['cum_taker_fees'].diff().fillna(0.0)
 
     # For gross PnL we want the position *going into* each interval; at t=0
     # that's the position at window start (= actual_pos.iloc[0]), not 0.
@@ -192,6 +216,8 @@ def main():
         target_pnl=('target_pnl_incr', 'sum'),
         gross_pnl=('gross_pnl_incr', 'sum'),
         fees=('fee_incr', 'sum'),
+        maker_fees=('maker_fee_incr', 'sum'),
+        taker_fees=('taker_fee_incr', 'sum'),
     )
     buckets['net_pnl'] = buckets['gross_pnl'] - buckets['fees']
     buckets['miss'] = buckets['net_pnl'] - buckets['target_pnl']
@@ -200,14 +226,28 @@ def main():
     total_gross  = df['cum_gross_pnl'].iloc[-1]
     total_net    = df['cum_net_pnl'].iloc[-1]
     total_fees   = df['cum_fees'].iloc[-1]
+    total_maker_fees = df['cum_maker_fees'].iloc[-1]
+    total_taker_fees = df['cum_taker_fees'].iloc[-1]
     total_miss   = total_net - total_target
 
-    w = 108
+    fill_points = pd.DataFrame(columns=['fill_price', 'cum_net_pnl', 'crossed'])
+    if not f.empty:
+        fill_points = (
+            f[['time', 'price', 'crossed']]
+            .dropna(subset=['time'])
+            .sort_values('time')
+            .rename(columns={'price': 'fill_price'})
+            .set_index('time')
+        )
+        fill_points['cum_net_pnl'] = df['cum_net_pnl'].reindex(fill_points.index, method='ffill')
+        fill_points = fill_points.dropna(subset=['cum_net_pnl'])
+
+    w = 130
     header_label = f" PnL ATTRIBUTION ({rule} buckets){window_label} "
     print()
     print(f"  {header_label:═^{w}}")
     print(f"  {'bucket':<8}{'fv':>10}{'avg unhedged':>16}"
-          f"{'target $':>12}{'gross $':>12}{'fees $':>10}{'net $':>12}{'miss $':>12}")
+          f"{'target $':>12}{'gross $':>12}{'fees $':>10}{'maker $':>10}{'taker $':>10}{'net $':>12}{'miss $':>12}")
     print(f"  {'-'*(w-2)}")
     for ts, row in buckets.iterrows():
         if pd.isna(row['fv_start']):
@@ -216,15 +256,16 @@ def main():
               f"{row['fv_start']:>10.6f}"
               f"{row['avg_unhedged']:>16,.0f}"
               f"{row['target_pnl']:>12,.2f}{row['gross_pnl']:>12,.2f}"
-              f"{row['fees']:>10,.2f}{row['net_pnl']:>12,.2f}"
+              f"{row['fees']:>10,.2f}{row['maker_fees']:>10,.2f}{row['taker_fees']:>10,.2f}{row['net_pnl']:>12,.2f}"
               f"{row['miss']:>12,.2f}")
     print(f"  {'-'*(w-2)}")
     print(f"  {'TOTAL':<8}{'':>10}{'':>16}"
           f"{total_target:>12,.2f}{total_gross:>12,.2f}"
-          f"{total_fees:>10,.2f}{total_net:>12,.2f}"
+          f"{total_fees:>10,.2f}{total_maker_fees:>10,.2f}{total_taker_fees:>10,.2f}{total_net:>12,.2f}"
           f"{total_miss:>12,.2f}")
     print(f"  {'═'*(w-2)}")
     print(f"  opening position: {start_pos:+,.0f} tokens @ {df['fair_value'].iloc[0]:.6f}")
+    print(f"  fee breakdown: maker ${total_maker_fees:,.2f}  /  taker ${total_taker_fees:,.2f}")
     print()
 
     import matplotlib.dates as mdates
@@ -243,6 +284,11 @@ def main():
     ax[0].fill_between(df.index, df['cum_target_pnl'], df['cum_net_pnl'],
                        where=(df['cum_net_pnl'] < df['cum_target_pnl']),
                        color='tab:red', alpha=0.15, interpolate=True, label='miss (net < target)')
+    ioc_points = fill_points[fill_points['crossed'].eq(True)]
+    if not ioc_points.empty:
+        ax[0].scatter(ioc_points.index, ioc_points['cum_net_pnl'],
+                      s=28, marker='x', color='tab:purple',
+                      linewidths=1.1, alpha=0.9, label='IOC fill')
     ax[0].axhline(0, color='gray', lw=0.5)
     ax[0].set_ylabel('Cumulative hedge PnL ($)')
     ax[0].set_title(f'Hedge PnL breakdown — {args.date}{window_label}  '
@@ -266,6 +312,19 @@ def main():
     ax[1].set_ylabel('Position (tokens)')
     ax[1].legend(loc='best', fontsize=8)
     ax[1].grid(alpha=0.3)
+
+    ax1_right = ax[1].twinx()
+    ax1_right.plot(df.index, df['vault_pos_ratio'], color='tab:purple', lw=1.0,
+                   alpha=0.65, linestyle='--', label='pos=(base-quote)/(base+quote)')
+    ax1_right.axhline(0, color='tab:purple', lw=0.4, alpha=0.35)
+    ax1_right.set_ylabel('Vault Pos Ratio')
+    ax1_right.tick_params(axis='y', colors='tab:purple')
+    ax1_right.yaxis.label.set_color('tab:purple')
+    ax1_right.spines['right'].set_color('tab:purple')
+
+    left_handles, left_labels = ax[1].get_legend_handles_labels()
+    right_handles, right_labels = ax1_right.get_legend_handles_labels()
+    ax[1].legend(left_handles + right_handles, left_labels + right_labels, loc='best', fontsize=8)
 
     ax[2].plot(df.index, df['target_minus_gross'], color='tab:orange', lw=1.1,
                label='target - gross')
@@ -293,8 +352,14 @@ def main():
     ax[3].grid(alpha=0.3)
 
     ax[4].plot(df.index, df['fair_value'], color='tab:blue', lw=1.0)
+    if not ioc_points.empty:
+        ax[4].scatter(ioc_points.index, ioc_points['fill_price'],
+                      s=24, marker='x', color='tab:purple',
+                      linewidths=1.1, alpha=0.9, label='IOC fill')
     ax[4].set_ylabel('Fair value')
     ax[4].set_xlabel('Time (UTC)')
+    if not ioc_points.empty:
+        ax[4].legend(loc='best', fontsize=8)
     ax[4].grid(alpha=0.3)
 
     if args.show:
@@ -326,6 +391,9 @@ def main():
                 f"target: {fmt_hover_value(df['cum_target_pnl'].iloc[idx])}",
                 f"gross:  {fmt_hover_value(df['cum_gross_pnl'].iloc[idx])}",
                 f"net:    {fmt_hover_value(df['cum_net_pnl'].iloc[idx])}",
+                f"fees:         {fmt_hover_value(df['cum_fees'].iloc[idx], signed=False)}",
+                f"maker fees:   {fmt_hover_value(df['cum_maker_fees'].iloc[idx], signed=False)}",
+                f"taker fees:   {fmt_hover_value(df['cum_taker_fees'].iloc[idx], signed=False)}",
                 f"target-gross: {fmt_hover_value(df['target_minus_gross'].iloc[idx])}",
                 f"target-net:   {fmt_hover_value(df['target_minus_net'].iloc[idx])}",
                 f"|target-net|: {fmt_hover_value(df['abs_target_minus_net'].iloc[idx], signed=False)}",
