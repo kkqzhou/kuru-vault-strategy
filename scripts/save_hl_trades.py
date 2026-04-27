@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-DEFAULT_ADDRESS = "0xa59c4CB5C24983d1F0076a52d4F0e95cc5013Df5"
+DEFAULT_ADDRESS = "0x24B07aF36a937009d9c3E5018bde28cF7Ec1A31A"
 HL_API_URL = os.getenv("HL_API_URL", "https://api.hyperliquid.xyz")
 INFO_URL = f"{HL_API_URL}/info"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '../data')
